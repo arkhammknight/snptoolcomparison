@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.log
+
+# Nextflow specific
+.nextflow/
+.nextflow.log*
+work/
+.work/
+results/
+
+# Environment
+Miniconda3-latest-Linux-x86_64.sh
+*.env
+
+# Project specific
+input/
+output/
