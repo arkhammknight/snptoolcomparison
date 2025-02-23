@@ -9,7 +9,7 @@ A Python tool for comparing CNV (Copy Number Variation) data from different sour
 ## Usage
 
 ```bash
-python cnv_comparator.py <GS_File> <NX_File> <OM_File> <Gold_File> <Output_File>
+nextflow run main.nf
 ```
 
 ## Requirements
