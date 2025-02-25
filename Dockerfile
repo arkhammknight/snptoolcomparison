@@ -18,12 +18,10 @@ RUN conda config --add channels conda-forge && \
     conda install -n base -c conda-forge mamba
 
 COPY environment.yml /app/
-RUN mamba env create -f environment.yml \
-    conda clean --all -y
+RUN mamba env create -f /app/environment.yml && conda clean --all -y
 
 COPY main.nf /app/
 COPY cnv_comparator.py /app/
 
-# Activate bioenv by default
 ENTRYPOINT ["/bin/bash", "-c", "source /opt/conda/etc/profile.d/conda.sh && conda activate bioenv && exec \"$@\"", "--"]
 CMD ["nextflow", "run", "/app/main.nf"]
