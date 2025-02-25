@@ -14,13 +14,12 @@ logging.basicConfig(
     ]
 )
 
-def format_cnv_output(df, software_name):
-    """CNV listesini yazılım adına göre biçimlendirerek döndürür."""
+def format_cnv_output(df, software_name, label):
     count = len(df)
     if df.empty:
-        return f"\n### {software_name} (CNV bulunamadı)\n\n"
+        return f"\n### {software_name} ({label}) (CNV bulunamadı)\n\n"
 
-    output = f"\n### {software_name} ({count} adet TP CNV)\n"
+    output = f"\n### {software_name} ({label}) ({count} adet)\n"
     output += "Chromosome\tStart_Pos\tEnd_Pos\tLength\n"
     
     for _, row in df.iterrows():
@@ -29,13 +28,11 @@ def format_cnv_output(df, software_name):
     return output
 
 def load_cnv_data(file_path):
-    """CNV verilerini yükler."""
     try:
         logging.info(f"Loading file: {file_path}")
-        
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
-
+        
         if file_path.endswith('.xlsx'):
             df = pd.read_excel(file_path, engine='openpyxl')
         elif file_path.endswith('.csv'):
@@ -53,48 +50,73 @@ def load_cnv_data(file_path):
         sys.exit(1)
 
 def parse_chromosome_region(region):
-    """NxClinical'deki 'Chromosome Region' sütununu parçalayarak kromozom, start ve end çıkarır."""
-    match = re.match(r'chr(\d+):([\d.]+)-([\d.]+)', str(region))
+    if pd.isna(region) or not isinstance(region, str):
+        return None, None, None
+    
+    # Daha esnek bir regex: "chr" opsiyonel olabilir
+    match = re.match(r'(?:chr)?([\dXY]+):([\d.]+)-([\d.]+)', str(region))
     if match:
-        chromosome = int(match.group(1))  # Kromozom numarası
-        start = int(match.group(2).replace('.', ''))  # Noktalı sayıyı tam sayıya çevir
-        end = int(match.group(3).replace('.', ''))  # Noktalı sayıyı tam sayıya çevir
+        chromosome = match.group(1)  # "X", "Y" veya sayısal
+        start = int(float(match.group(2).replace('.', '')))
+        end = int(float(match.group(3).replace('.', '')))
         return chromosome, start, end
+    
+    # Eğer format uymuyorsa logla ve None dön
+    logging.warning(f"Unable to parse region: {region}")
     return None, None, None
 
 def preprocess_cnv_data(gs_df, nx_df, om_df, gold_df):
-    """Veri setlerini ortak formatta normalize eder."""
     gs_df.rename(columns={'Chr': 'Chromosome', 'Start': 'Start_Pos', 'End': 'End_Pos'}, inplace=True)
     
     nx_df[['Chromosome', 'Start_Pos', 'End_Pos']] = nx_df['Chromosome Region'].apply(
         lambda x: pd.Series(parse_chromosome_region(x))
     )
+    # NxClinical'daki kromozomları gold standard ile uyumlu hale getir
+    nx_df['Chromosome'] = pd.to_numeric(nx_df['Chromosome'], errors='ignore')
     
     om_df.rename(columns={'Chromosome': 'Chromosome', 'Start': 'Start_Pos', 'End': 'End_Pos'}, inplace=True)
     gold_df.rename(columns={'Chr': 'Chromosome', 'Start': 'Start_Pos', 'End': 'End_Pos'}, inplace=True)
     
     return gs_df, nx_df, om_df, gold_df
 
-def is_true_positive(cnv, gold_df):
-    """Bir CNV'nin altın standart veri ile %50 veya daha fazla örtüşüp örtüşmediğini kontrol eder."""
+def classify_cnv(cnv, gold_df):
     chrom, start, end = cnv['Chromosome'], cnv['Start_Pos'], cnv['End_Pos']
+    # NaN kontrolü
+    if pd.isna(chrom) or pd.isna(start) or pd.isna(end):
+        return "FP"
     
     for _, gold in gold_df.iterrows():
-        if gold['Chromosome'] == chrom:
+        # Kromozomları string olarak karşılaştır
+        if str(gold['Chromosome']) == str(chrom):
             overlap_start = max(start, gold['Start_Pos'])
             overlap_end = min(end, gold['End_Pos'])
-            
-            if overlap_start < overlap_end:  # Gerçek bir örtüşme varsa
+            if overlap_start < overlap_end:
                 overlap_length = overlap_end - overlap_start
                 cnv_length = end - start
-                
-                if (overlap_length / cnv_length) >= 0.5:  # %50'den fazla örtüşüyorsa
-                    return True
-    return False
+                if (overlap_length / cnv_length) >= 0.5:
+                    return "TP"
+    return "FP"
 
-def find_true_positives(df, gold_df):
-    """Verilen yazılımın CNV çağrılarından true positive (TP) olanları belirler."""
-    return df[df.apply(lambda row: is_true_positive(row, gold_df), axis=1)]
+def classify_cnv_calls(df, gold_df):
+    df['Class'] = df.apply(lambda row: classify_cnv(row, gold_df), axis=1)
+    return df[df['Class'] == "TP"].drop(columns=['Class']), df[df['Class'] == "FP"].drop(columns=['Class'])
+
+def find_false_negatives(gold_df, gs_df, nx_df, om_df):
+    detected_cnv = pd.concat([gs_df, nx_df, om_df])
+    fn_list = []
+    
+    for _, gold in gold_df.iterrows():
+        chrom, start, end = gold['Chromosome'], gold['Start_Pos'], gold['End_Pos']
+        overlap = detected_cnv[
+            (detected_cnv['Chromosome'] == chrom) &
+            (detected_cnv['Start_Pos'] <= end) &
+            (detected_cnv['End_Pos'] >= start)
+        ]
+        
+        if overlap.empty:
+            fn_list.append(gold)
+    
+    return pd.DataFrame(fn_list)
 
 def main(gs_file, nx_file, om_file, gold_file, output_file):
     logging.info("\n" + "="*50)
@@ -110,22 +132,69 @@ def main(gs_file, nx_file, om_file, gold_file, output_file):
     logging.info("\nPreprocessing data...")
     gs_df, nx_df, om_df, gold_df = preprocess_cnv_data(gs_df, nx_df, om_df, gold_df)
     
-    logging.info("\nFinding true positive CNVs...")
-    tp_gs = find_true_positives(gs_df, gold_df)
-    tp_nx = find_true_positives(nx_df, gold_df)
-    tp_om = find_true_positives(om_df, gold_df)
+    logging.info("\nClassifying CNVs...")
+    tp_gs, fp_gs = classify_cnv_calls(gs_df, gold_df)
+    tp_nx, fp_nx = classify_cnv_calls(nx_df, gold_df)
+    tp_om, fp_om = classify_cnv_calls(om_df, gold_df)
+    
+    logging.info("\nFinding False Negatives...")
+    fn_gs = find_false_negatives(gold_df, gs_df, pd.DataFrame(), pd.DataFrame())
+    fn_nx = find_false_negatives(gold_df, pd.DataFrame(), nx_df, pd.DataFrame())
+    fn_om = find_false_negatives(gold_df, pd.DataFrame(), pd.DataFrame(), om_df)
+    
+    # Performans metriklerini hesapla
+    def calculate_metrics(tp, fp, fn):
+        tp_count = len(tp)
+        fp_count = len(fp)
+        fn_count = len(fn)
+        
+        recall = tp_count / (tp_count + fn_count) if (tp_count + fn_count) > 0 else 0
+        precision = tp_count / (tp_count + fp_count) if (tp_count + fp_count) > 0 else 0
+        f1_score = (2 * recall * precision) / (recall + precision) if (recall + precision) > 0 else 0
+        
+        return recall, precision, f1_score
+    
+    # Her yazılım için metrikleri hesapla
+    gs_recall, gs_precision, gs_f1 = calculate_metrics(tp_gs, fp_gs, fn_gs)
+    nx_recall, nx_precision, nx_f1 = calculate_metrics(tp_nx, fp_nx, fn_nx)
+    om_recall, om_precision, om_f1 = calculate_metrics(tp_om, fp_om, fn_om)
     
     logging.info("\nWriting results...")
     with open(output_file, 'w', encoding='utf-8-sig') as f:
         f.write(f"### Analysis timestamp: {datetime.now()}\n\n")
         f.write(f"### True Positive CNVs ({len(tp_gs) + len(tp_nx) + len(tp_om)} adet):\n")
+        f.write(format_cnv_output(tp_gs, "GenomStudio", "TP"))
+        f.write(format_cnv_output(tp_nx, "NxClinical", "TP"))
+        f.write(format_cnv_output(tp_om, "Ömer Software", "TP"))
         
-        f.write(format_cnv_output(tp_gs, "GenomStudio"))
-        f.write(format_cnv_output(tp_nx, "NxClinical"))
-        f.write(format_cnv_output(tp_om, "Ömer Software"))
+        f.write(f"\n### False Positive CNVs ({len(fp_gs) + len(fp_nx) + len(fp_om)} adet):\n")
+        f.write(format_cnv_output(fp_gs, "GenomStudio", "FP"))
+        f.write(format_cnv_output(fp_nx, "NxClinical", "FP"))
+        f.write(format_cnv_output(fp_om, "Ömer Software", "FP"))
+        
+        f.write(f"\n### False Negative CNVs:\n")
+        f.write(f"GenomStudio: {len(fn_gs)} adet\n")
+        f.write(f"NxClinical: {len(fn_nx)} adet\n")
+        f.write(f"Ömer Software: {len(fn_om)} adet\n")
+        
+        # Yeni başlık ve metrikler
+        f.write(f"\n### Performance Metrics:\n")
+        f.write(f"GenomStudio:\n")
+        f.write(f"  Recall: {gs_recall:.4f}\n")
+        f.write(f"  Precision: {gs_precision:.4f}\n")
+        f.write(f"  F1-Score: {gs_f1:.4f}\n")
+        f.write(f"NxClinical:\n")
+        f.write(f"  Recall: {nx_recall:.4f}\n")
+        f.write(f"  Precision: {nx_precision:.4f}\n")
+        f.write(f"  F1-Score: {nx_f1:.4f}\n")
+        f.write(f"Ömer Software:\n")
+        f.write(f"  Recall: {om_recall:.4f}\n")
+        f.write(f"  Precision: {om_precision:.4f}\n")
+        f.write(f"  F1-Score: {om_f1:.4f}\n")
     
     logging.info(f"Results saved to: {output_file}")
     print(f"Karşılaştırma tamamlandı. Sonuçlar {output_file} dosyasına kaydedildi.")
+
 
 if __name__ == "__main__":
     if len(sys.argv) != 6:
