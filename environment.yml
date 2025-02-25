@@ -1,0 +1,10 @@
+name: bioenv
+channels:
+  - conda-forge
+dependencies:
+  - python=3.9
+  - pandas
+  - numpy
+  - scipy
+  - openpyxl
+  - r-base=4.1.2
