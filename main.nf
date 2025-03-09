@@ -10,7 +10,6 @@ process CompareCNVs {
     path gs_file
     path nx_file
     path om_file
-    path gold_file
     
     output:
     path "comparison_results.txt"
@@ -21,7 +20,7 @@ process CompareCNVs {
     script:
     """
     #!/bin/bash
-    python ${projectDir}/cnv_comparator.py ${gs_file} ${nx_file} ${om_file} ${gold_file} comparison_results.txt
+    python ${projectDir}/cnv_comparator.py ${gs_file} ${nx_file} ${om_file} comparison_results.txt
     """
 }
 
@@ -34,8 +33,7 @@ workflow {
     gs_ch = Channel.fromPath(params.gs_file, checkIfExists: true)
     nx_ch = Channel.fromPath(params.nx_file, checkIfExists: true)
     om_ch = Channel.fromPath(params.om_file, checkIfExists: true)
-    gold_ch = Channel.fromPath(params.gold_file, checkIfExists: true)
 
     // Run comparison
-    CompareCNVs(gs_ch, nx_ch, om_ch, gold_ch)
+    CompareCNVs(gs_ch, nx_ch, om_ch)
 }
